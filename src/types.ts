@@ -38,6 +38,23 @@ export interface PatternObject extends StyleSpec {
   path: PathSegment[];
 }
 
+/** Provenance of objects added through an offline package merge/import. */
+export interface ImportLogEntry {
+  /** ISO timestamp of the import. */
+  at: string;
+  /** Package format version that was imported. */
+  formatVersion: number;
+  sourceProjectId: string;
+  sourceProjectName: string;
+  mode: 'new' | 'merge';
+  /**
+   * Maps the source object id to the id it received inside this project.
+   * Empty for a standalone import; present (possibly with identity entries)
+   * for a merge so the mapping stays traceable after the fact.
+   */
+  objectMap: Array<{ from: string; to: string; renamed: boolean }>;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -46,6 +63,8 @@ export interface Project {
   cellHeight: number;
   objects: PatternObject[];
   updatedAt: number;
+  /** Audit trail of offline package imports. Absent for never-imported projects. */
+  importLog?: ImportLogEntry[];
 }
 
 export type Tool = 'select' | 'node' | 'pen' | 'rectangle' | 'ellipse';
