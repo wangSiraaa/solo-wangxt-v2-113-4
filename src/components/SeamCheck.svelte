@@ -43,6 +43,9 @@
     <label>导出倍率 <input type="number" min="1" max="4" bind:value={scale} on:change={rebuild} /></label>
     <button on:click={download}>导出周期单元 PNG</button>
   </div>
+  <div class="row">
+    <slot></slot>
+  </div>
   {#if tile}
     <p class="meta">
       单元 {Math.round(tile.width)}×{Math.round(tile.height)}；三角晶格使用 {tile.repeats[0]}×{tile.repeats[1]}

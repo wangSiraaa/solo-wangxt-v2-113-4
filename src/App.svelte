@@ -4,6 +4,7 @@
   import GroupPanel from './components/GroupPanel.svelte';
   import Inspector from './components/Inspector.svelte';
   import SeamCheck from './components/SeamCheck.svelte';
+  import ImportExport from './components/ImportExport.svelte';
   import {
     editor,
     markSaved,
@@ -15,6 +16,7 @@
     updateProject,
     renderOptions
   } from './lib/stores';
+  import { autoSaveEnabled } from './lib/autosave';
   import { deleteProject, listProjects, saveProject } from './lib/db';
   import { defaultProject, glideSample, p6mSample, rotationSample } from './lib/samples';
   import type { Project, Tool } from './types';
@@ -22,6 +24,7 @@
   let savedProjects: Project[] = [];
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let activeTab: 'group' | 'inspector' | 'seam' | 'projects' = 'group';
+  let transferPanel: ImportExport;
 
   const tools: Array<{ id: Tool; label: string; title: string }> = [
     { id: 'select', label: '选择/拖动', title: '选择实例并拖动；拖动映射回原始路径' },
@@ -31,10 +34,30 @@
     { id: 'ellipse', label: '椭圆', title: '创建椭圆贝塞尔路径' }
   ];
 
+  /**
+   * 每次编辑器切换工程（含导入提交）时自增；挂起的防抖计时器回调会核对
+   * 自己被调度时的工程 ID，防止旧工作副本在导入后迟到覆盖新记录。
+   */
+  let projectEpoch = 0;
+
+  function clearPendingSave() {
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+  }
+
   function scheduleSave() {
-    if (saveTimer) clearTimeout(saveTimer);
+    if (!$autoSaveEnabled) return;
+    clearPendingSave();
+    const epoch = projectEpoch;
+    const projectId = $editor.project.id;
     saveTimer = setTimeout(async () => {
+      saveTimer = null;
+      if (!$autoSaveEnabled || epoch !== projectEpoch || $editor.project.id !== projectId) return;
       await saveProject($editor.project);
+      // 等待期间用户可能已导入并切换工程，落库后再核对一次。
+      if (!$autoSaveEnabled || epoch !== projectEpoch || $editor.project.id !== projectId) return;
       markSaved();
       await refreshProjects();
     }, 700);
@@ -45,12 +68,24 @@
   }
 
   async function saveNow() {
-    await saveProject($editor.project);
+    if (!$autoSaveEnabled) return;
+    clearPendingSave();
+    const snapshot = $editor.project;
+    await saveProject(snapshot);
+    if ($editor.project.id !== snapshot.id) return;
     markSaved();
     await refreshProjects();
   }
 
+  /** 导入流程调用：先暂停自动保存（取消挂起计时器），再强制把当前工作副本落库。 */
+  async function flushBeforeImport() {
+    clearPendingSave();
+    await saveProject($editor.project);
+    await refreshProjects();
+  }
+
   function loadProject(project: Project) {
+    projectEpoch += 1;
     setProject(project);
     scheduleSave();
   }
@@ -61,6 +96,7 @@
   }
 
   function newProject() {
+    projectEpoch += 1;
     setProject(defaultProject());
   }
 
@@ -82,6 +118,18 @@
 
   const unsubscribe = editor.subscribe(scheduleSave);
 
+  // 导入期间禁用自动保存：立即取消任何挂起计时器，杜绝旧工作副本迟到写入。
+  const unsubscribeGate = autoSaveEnabled.subscribe((enabled) => {
+    if (!enabled) clearPendingSave();
+  });
+
+  async function onTransferCommitted() {
+    projectEpoch += 1;
+    await refreshProjects();
+    // 导入后切换到工程库，展示新增/合并结果与冲突映射。
+    activeTab = 'projects';
+  }
+
   onMount(async () => {
     await refreshProjects();
     window.addEventListener('keydown', keyboard);
@@ -89,8 +137,9 @@
 
   onDestroy(() => {
     unsubscribe();
+    unsubscribeGate();
     window.removeEventListener('keydown', keyboard);
-    if (saveTimer) clearTimeout(saveTimer);
+    clearPendingSave();
   });
 </script>
 
@@ -124,10 +173,11 @@
       <button disabled={!$editor.canRedo} on:click={redo}>重做</button>
     </div>
     <div class="samples">
-      <button on:click={() => setProject(glideSample())}>滑移样例</button>
-      <button on:click={() => setProject(rotationSample())}>旋转样例</button>
-      <button on:click={() => setProject(p6mSample())}>完整样例</button>
+      <button on:click={() => { projectEpoch += 1; setProject(glideSample()); }}>滑移样例</button>
+      <button on:click={() => { projectEpoch += 1; setProject(rotationSample()); }}>旋转样例</button>
+      <button on:click={() => { projectEpoch += 1; setProject(p6mSample()); }}>完整样例</button>
       <button on:click={newProject}>重置</button>
+      <button on:click={() => (activeTab = 'projects')} title="导入/导出离线工程包">导入/导出包</button>
     </div>
     <label class="toggle"><input type="checkbox" bind:checked={$renderOptions.showDomain} />基本域</label>
     <label class="toggle"><input type="checkbox" bind:checked={$renderOptions.showGrid} />晶格</label>
@@ -148,11 +198,25 @@
         {:else if activeTab === 'inspector'}
           <Inspector />
         {:else if activeTab === 'seam'}
-          <SeamCheck />
+          <SeamCheck>
+            <div class="seam-transfer">
+              <button on:click={() => transferPanel.exportPackage()} title="导出含群、路径、样式、对象 ID 与格式版本的离线工程包">
+                导出工程包 (.wsp.json)
+              </button>
+            </div>
+          </SeamCheck>
         {:else}
           <section class="projects">
-            <h3>IndexedDB 工程</h3>
-            <button on:click={refreshProjects}>刷新</button>
+            <h3>工程库 / 离线交换</h3>
+            <ImportExport
+              bind:this={transferPanel}
+              saveCurrent={flushBeforeImport}
+              bindCommit={onTransferCommitted}
+            />
+            <div class="saved-head">
+              <h4>IndexedDB 工程</h4>
+              <button on:click={refreshProjects}>刷新</button>
+            </div>
             {#if savedProjects.length === 0}
               <p>暂无已保存工程。编辑会自动保存。</p>
             {:else}
@@ -162,6 +226,13 @@
                     <div>
                       <strong>{project.name}</strong>
                       <small>{project.group} · {new Date(project.updatedAt).toLocaleString()}</small>
+                      {#if project.importTrace}
+                        <small class="trace-line">
+                          {project.importTrace.mode === 'merge' ? '合并导入' : '导入创建'} · 格式 v{project.importTrace.packageFormat}
+                          · {project.importTrace.objects.length} 个对象
+                          ({project.importTrace.objects.filter((o) => o.remapped).length} 个 ID 重映射)
+                        </small>
+                      {/if}
                     </div>
                     <button on:click={() => loadProject(project)}>打开</button>
                     <button class="danger" on:click={() => removeProject(project)}>删除</button>
@@ -339,6 +410,25 @@
   .projects small {
     display: block;
     color: #64748b;
+  }
+  .projects .trace-line {
+    color: #1d4ed8;
+  }
+  .saved-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 14px 0 0;
+  }
+  .saved-head h4 {
+    margin: 0;
+  }
+  .seam-transfer {
+    display: flex;
+    width: 100%;
+  }
+  .seam-transfer button {
+    flex: 1;
   }
   .danger {
     background: #fff1f2;
